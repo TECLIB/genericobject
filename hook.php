@@ -133,6 +133,7 @@ function plugin_genericobject_install() {
    return true;
 }
 
+
 function plugin_genericobject_uninstall() {
    global $DB;
 
