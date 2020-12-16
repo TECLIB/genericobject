@@ -25,7 +25,7 @@
  @since     2009
  ---------------------------------------------------------------------- */
 
-class PluginGenericobjectObject_Item extends CommonDBChild {
+class PluginGenericobjectObject_Item extends CommonDBRelation {
 
    public $dohistory = true;
 
@@ -35,6 +35,7 @@ class PluginGenericobjectObject_Item extends CommonDBChild {
 
    static public $itemtype_2 = 'itemtype';
    static public $items_id_2 = 'items_id';
+   static public $logs_for_item_2 = false;
 
    //Get itemtype name
    static function getTypeName($nb = 0) {
@@ -62,6 +63,64 @@ class PluginGenericobjectObject_Item extends CommonDBChild {
       return Session::haveRight(self::$itemtype_1, CREATE);
    }
 
+   static function canPurge() {
+      //Note : can be add a right
+      return true;
+   }
+
+   static function canDelete() {
+      //useless
+      //Note : can be add a right
+      return true;
+   }
+
+   function post_purgeItem() {
+      global $DB;
+      // Delete the other genericobject link
+      $obj_itemtype = $this->fields['itemtype'].'_Item';
+      $obj_item = new $obj_itemtype();
+      $itemtype = $this->fields['itemtype'];
+      $obj = new $itemtype();
+      $column = str_replace('glpi_', '', $obj->table.'_id');
+      $obj_item->deleteByCriteria([
+                        'items_id' => $this->fields[static::$items_id_1],
+                        $column => $this->fields['items_id'],
+                        'itemtype' => static::$itemtype_1]
+      );
+      parent::post_purgeItem();
+   }
+
+   static function getSpecificValueToDisplay($field, $values, array $options = []) {
+      if (!is_array($values)) {
+         $values = [$field => $values];
+      }
+      switch ($field) {
+         // Column "Linked objects" : Display name of the object and type of object
+         case 'id' :
+            $itemtype = get_called_class();
+            $objectItem = new $itemtype();
+            $objectItem->getFromDB($values['id']);
+            $namelinkedObject = $objectItem->fields['itemtype'];
+            $oobjectLinked = new $namelinkedObject();
+            $oobjectLinked->getFromDB($objectItem->fields['items_id']);
+            return $oobjectLinked->getLink()." - (".$oobjectLinked->getTypeName().")";
+      }
+   }
+
+   public static function getDropdownItemLinked($object, $itemType, $id) {
+      $obj = new $itemType();
+      $nameMainObjectItem = $itemType."_Item";
+      $mainObjectItem = new $nameMainObjectItem();
+      $column = str_replace('glpi_', '', $obj->table."_id");
+      $listeId = [];
+      foreach ($mainObjectItem->find() as $record) {
+         if ($record[$column] == $id) {
+            $listeId[] = $record['items_id'];
+         }
+      }
+      $object->dropdown(['used' => $listeId]);
+   }
+
    /**
     *
     * Enter description here ...
@@ -80,6 +139,136 @@ class PluginGenericobjectObject_Item extends CommonDBChild {
     */
    static function showItemsForTarget(CommonDBTM $item) {
 
+   }
+
+   static function showItems(CommonDBTM $item) {
+      global $DB, $CFG_GLPI;
+
+      $ID = $item->getID();
+      if (!$item->can($ID, READ)) {
+         return false;
+      }
+      $canedit = $item->canEdit($ID);
+      $rand    = mt_rand();
+
+      $datas = [];
+      $used  = [];
+      foreach ($item->getLinkedItemTypesAsArray() as $itemtype) {
+         $object = new $itemtype();
+         if ($object->canView()) {
+            $iterator = self::getTypeItems($ID, $itemtype);
+
+            while ($data = $iterator->next()) {
+               $data['assoc_itemtype'] = $itemtype;
+               $datas[]           = $data;
+               $used[$itemtype][] = $data['id'];
+            }
+         }
+      }
+      $number = count($datas);
+
+      if ($canedit) {
+         echo "<div class='firstbloc'>";
+         echo "<form method='post' action='".Toolbox::getItemTypeFormURL(__CLASS__)."'>";
+         echo "<div class='spaced'>";
+         echo "<table class='tab_cadre_fixe'>";
+         echo "<tr class='tab_bg_1'>";
+         echo "<td class='center'>".__("Select an object to link", 'genericobject')."&nbsp;&nbsp;";
+
+         $options               = [];
+         $options['checkright'] = true;
+         $options['name']       = 'objectToAdd';
+
+         $rand = Dropdown::showItemType($item->getLinkedItemTypesAsArray(), $options);
+         if ($rand) {
+            $paramsselsoft = ['objectToAdd' => '__VALUE__',
+                              'idMainobject' => $ID,
+                              'mainobject' => $item->getType()];
+            Ajax::updateItemOnSelectEvent("dropdown_objectToAdd$rand", "show_".$rand,
+                                           $CFG_GLPI["root_doc"]."/plugins/genericobject/ajax/dropdownByItemtype.php",
+                                           $paramsselsoft);
+            echo "<span id='show_".$rand."'>&nbsp;</span>";
+         }
+
+         echo "<input type='hidden' name='items_id' value='$ID'>";
+         echo "<input type='hidden' name='mainobject' value='".$item->getType()."'>";
+         echo "</td><td width='20%'>";
+         echo "<input type='submit' name='add' value=\""._sx('button', 'Connect')."\" class='submit'>";
+         echo "</td>";
+         echo "</tr>";
+         echo "</table>";
+         echo "</div>";
+         Html::closeForm();
+         echo "</div>";
+      }
+
+      if ($number) {
+         echo "<div class='spaced'>";
+         if ($canedit) {
+            Html::openMassiveActionsForm('mass'.$item->getType().'_Item'.$rand);
+            $massiveactionparams
+                     = ['num_displayed'
+                           => min($_SESSION['glpilist_limit'], $number),
+                        'specific_actions'
+                            => ['purge' => _x('button', 'Disconnect')],
+                        'container'
+                            => 'mass'.$item->getType().'_Item'.$rand];
+
+            Html::showMassiveActions($massiveactionparams);
+         }
+         echo "<table class='tab_cadre_fixehov'>";
+         $header_begin  = "<tr>";
+         $header_top    = '';
+         $header_bottom = '';
+         $header_end    = '';
+
+         if ($canedit) {
+            $header_top    .= "<th width='10'>".Html::getCheckAllAsCheckbox('mass'.$item->getType().'_Item'.$rand);
+            $header_top    .= "</th>";
+            $header_bottom .= "<th width='10'>".Html::getCheckAllAsCheckbox('mass'.$item->getType().'_Item'.$rand);
+            $header_bottom .= "</th>";
+         }
+
+         $header_end .= "<th>".__('Type')."</th>";
+         $header_end .= "<th>".__('ID')."</th>";
+         $header_end .= "<th>".__('Name')."</th>";
+         echo $header_begin.$header_top.$header_end;
+
+         foreach ($datas as $data) {
+            $linkname = $data["name"];
+            $itemtype = $data['assoc_itemtype'];
+            if ($_SESSION["glpiis_ids_visible"] || empty($data["name"])) {
+               $linkname = sprintf(__('%1$s (%2$s)'), $linkname, $data["id"]);
+            }
+            $link = $itemtype::getFormURLWithID($data["id"]);
+            $name = "<a href=\"".$link."\">".$linkname."</a>";
+
+            echo "<tr class='tab_bg_1'>";
+
+            if ($canedit) {
+               echo "<td width='10'>";
+               Html::showMassiveActionCheckBox($item->getType().'_Item', $data["linkid"]);
+               echo "</td>";
+            }
+
+            echo "<td class='center'>".$itemtype::getTypeName(1)."</td>";
+            echo "<td class='center'>".$data["id"]."</td>";
+            echo "<td ".
+               ((isset($data['is_deleted']) && $data['is_deleted'])?"class='tab_bg_2_2'":"").
+               ">$name</td>";
+            echo "</tr>";
+         }
+
+         echo $header_begin.$header_bottom.$header_end;
+         echo "</table>";
+         if ($canedit) {
+            $massiveactionparams['ontop'] = false;
+            Html::showMassiveActions($massiveactionparams);
+            Html::closeForm();
+         }
+         echo "</div>";
+      }
+      return true;
    }
 
    /**
@@ -104,20 +293,22 @@ class PluginGenericobjectObject_Item extends CommonDBChild {
 
    function getTabNameForItem(CommonGLPI $item, $withtemplate = 0) {
       if (!$withtemplate) {
-         $itemtypes = self::getLinkedItemTypes();
+         $itemtypes = self::getLinkedItemTypes(get_class($item));
          if (in_array(get_class($item), $itemtypes) || get_class($item) == self::getItemType1()) {
-            return [1 => __("Objects management", "genericobject")];
+            //return [1 => __("Objects management", "genericobject")];
+            $coluimn1 = str_replace('glpi_', '', $item->table.'_id');
+            $nb = countElementsInTable(getTableForItemType($item->getType().'_Item'),
+                     ["$coluimn1" => $item->getID()]);
+            $str = _n("Linked object", "Linked objects", $nb == 0 ? 1 : $nb, "genericobject");
+            return [1 => self::createTabEntry($str, $nb)];
          }
       }
       return '';
    }
 
    static function displayTabContentForItem(CommonGLPI $item, $tabnum = 1, $withtemplate = 0) {
-      $itemtypes = self::getLinkedItemTypes();
-      if (get_class($item) == self::getItemType1()) {
-         self::showItemsForSource($item);
-      } else if (in_array(get_class($item), $itemtypes)) {
-         self::showItemsForTarget($item);
+      if ($tabnum == 1) {
+         self::showItems($item);
       }
       return true;
    }
